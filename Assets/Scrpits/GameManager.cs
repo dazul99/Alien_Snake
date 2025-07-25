@@ -4,13 +4,14 @@ using System.Runtime.CompilerServices;
 using Unity.VisualScripting;
 using Unity.VisualScripting.Antlr3.Runtime;
 using UnityEngine;
+using static Unity.Burst.Intrinsics.X86;
 
 public class GameManager : MonoBehaviour
 {
     private int lifes = 3;
 
     private int mutationBarCount = 0;
-    private int mutationBarMax = 5;
+    private int mutationBarMax = 1;
 
     private int snakeLength = 0;
     private int partsLost = 0;
@@ -43,6 +44,11 @@ public class GameManager : MonoBehaviour
     private bool grownThisTurn = false;
     private bool lostLife = false;
 
+    private int damageTaken;
+    [SerializeField] private int maxDamage = 10;
+
+    private bool stunned = false;
+
     public enum BoardElem
     {
         Nothing = 0,
@@ -59,7 +65,6 @@ public class GameManager : MonoBehaviour
 
     [SerializeField] private GameObject[] gameObjects;
 
-
     public enum Direction
     {
         Up = 0,
@@ -68,10 +73,20 @@ public class GameManager : MonoBehaviour
         Left = 3,
     }
 
+    [SerializeField] private int[] roads;
+    [SerializeField] private bool[] horizontalRoads;
+
+    [SerializeField] private int chanceOfTankSpawn;
+    [SerializeField] private int chanceOfTruckSpawn;
+    private bool tankCD;
+    private bool truckCD;
+    private List<Vector2Int> spawnPositions;
+
     private void Start()
     {
         elemsOnMap = new List<GameObject>();
         body = new List<GameObject>();
+        spawnPositions = new List<Vector2Int>();
         board = new BoardElem[20,15];
         position.Item1 = (int) (head.transform.position.x / lengthOfCell);
         position.Item2 = (int)(head.transform.position.y / -lengthOfCell);
@@ -80,15 +95,39 @@ public class GameManager : MonoBehaviour
         GameObject aux;
         for (int i = 0; i < inputsBoardElems.Length; i++)
         {
-            board[inputsPos[i].x, inputsPos[i].y] = inputsBoardElems[i];
-            aux = Instantiate(gameObjects[(int)inputsBoardElems[i]]);
-            aux.transform.position = new Vector3(inputsPos[i].x * lengthOfCell, inputsPos[i].y * -lengthOfCell, 0);
-            elemsOnMap.Add(aux);
-            aux.GetComponent<NPC>().ChangeType((int)inputsBoardElems[i]);
+            if (inputsBoardElems[i] != BoardElem.Tank || inputsBoardElems[i] != BoardElem.PlutoniumTruck)
+            {
+                board[inputsPos[i].x, inputsPos[i].y] = inputsBoardElems[i];
+                aux = Instantiate(gameObjects[(int)inputsBoardElems[i]]);
+                aux.transform.position = new Vector3(inputsPos[i].x * lengthOfCell, inputsPos[i].y * -lengthOfCell, 0);
+                elemsOnMap.Add(aux);
+                aux.GetComponent<NPC>().ChangeType((int)inputsBoardElems[i]);
+            }
         }
         
+        for(int i = 0; i < roads.Length; i++)
+        {
+            if (horizontalRoads[i])
+            {
+                spawnPositions.Add(new Vector2Int(0, roads[i]));
+                spawnPositions.Add(new Vector2Int(19, roads[i]));
+            }
+            else
+            {
+                spawnPositions.Add(new Vector2Int(roads[i], 0));
+                spawnPositions.Add(new Vector2Int(roads[i], 14));
+            }
+        }
+
         StartCoroutine("Turn");
         
+    }
+
+    public void AddedCivilian(GameObject go, (int, int) pos)
+    {
+        go.transform.position = new Vector3(pos.Item1 * lengthOfCell,pos.Item2 * -lengthOfCell, 0);
+        elemsOnMap.Add(go);
+        go.GetComponent<NPC>().ChangeType(5);
     }
 
     public (int,int) SnakePos()
@@ -111,7 +150,7 @@ public class GameManager : MonoBehaviour
             {
                 elemsOnMap[i].GetComponent<NPC>().Turn();
             }
-            Moveforward();
+            if(!stunned) Moveforward();
             if(gameOver)
             {
 
@@ -129,8 +168,101 @@ public class GameManager : MonoBehaviour
             {
                 elemsOnMap[i].GetComponent<NPC>().EndOfTurn();
             }
+            CheckSpawn();
             yield return new WaitForSeconds(durationOfTurn);
         }
+    }
+
+    private void CheckSpawn()
+    {
+        if (!truckCD)
+        {
+            int rand = Random.Range(0, 101);
+            if(chanceOfTruckSpawn > rand)
+            {
+                SpawnTruck();
+            }
+        }
+
+        if (!tankCD)
+        {
+            int rand = Random.Range(0, 101);
+            if (chanceOfTankSpawn > rand)
+            {
+                SpawnTank();
+            }
+        }
+    }
+
+    private void SpawnTruck()
+    {
+        List<Vector2Int> aux = new List<Vector2Int>();
+        for (int i = 0; i < spawnPositions.Count; i++) if (board[spawnPositions[i].x, spawnPositions[i].y] == BoardElem.Nothing) aux.Add(spawnPositions[i]);
+        int x = Random.Range(0, spawnPositions.Count);
+        board[aux[x].x, aux[x].y] = BoardElem.PlutoniumTruck;
+
+        GameObject truck = Instantiate(gameObjects[9]);
+        truck.transform.position = new Vector3(aux[x].x * lengthOfCell, aux[x].y * -lengthOfCell, 0);
+        elemsOnMap.Add(truck);
+        truck.GetComponent<NPC>().ChangeType(9);
+        StartCoroutine("TruckCooldown");
+    }
+
+    public Direction GetRoads(Vector2Int pos)
+    {
+        for (int i = 0;i < roads.Length; i++)
+        {
+            if (horizontalRoads[i] && roads[i] == pos.y)
+            {
+                if (position.Item1 > pos.x) return Direction.Left;
+                else if (position.Item1 < pos.x) return Direction.Right;
+                else
+                {
+                    if(Random.Range(0,2) == 0) return Direction.Left;
+                    else return Direction.Right;
+                }
+            }
+            else if (!horizontalRoads[i] && roads[i] == pos.x)
+            {
+                if (position.Item2 > pos.y) return Direction.Up;
+                else if (position.Item1 < pos.x) return Direction.Down;
+                else
+                {
+                    if (Random.Range(0, 2) == 0) return Direction.Up;
+                    else return Direction.Down;
+                }
+            }
+        }
+
+        return Direction.Left;
+    }
+
+    private IEnumerator TruckCooldown()
+    {
+        truckCD = true;
+        yield return new WaitForSeconds(2f);
+        truckCD = false;
+    }
+
+    private void SpawnTank()
+    {
+        List<Vector2Int> aux = new List<Vector2Int>();
+        for (int i = 0; i < spawnPositions.Count; i++) if (board[spawnPositions[i].x, spawnPositions[i].y] == BoardElem.Nothing) aux.Add(spawnPositions[i]);
+        int x = Random.Range(0, spawnPositions.Count);
+        board[aux[x].x, aux[x].y] = BoardElem.Tank;
+
+        GameObject tank = Instantiate(gameObjects[7]);
+        tank.transform.position = new Vector3(aux[x].x * lengthOfCell, aux[x].y * -lengthOfCell, 0);
+        elemsOnMap.Add(tank);
+        tank.GetComponent<NPC>().ChangeType(7);
+        StartCoroutine("TankCooldown");
+    }
+
+    private IEnumerator TankCooldown()
+    {
+        tankCD = true;
+        yield return new WaitForSeconds(2f);
+        tankCD = false;
     }
 
     public void ChangeDirection(Direction dir)
@@ -291,10 +423,17 @@ public class GameManager : MonoBehaviour
 
     private void DecreaseSize(int x)
     {
+        if(snakeLength == 0)
+        {
+            LoseLife(false);
+            return;
+        }
+        if(snakeLength < x) x = snakeLength;
         (int, int) pointer;
         GameObject aux;
-        for (int i = body.Count - 1; i >= (body.Count - x - 1); i--)
-        {
+        int number = body.Count;
+        for (int i = body.Count - 1; i > (number - x - 1); i--)
+        { 
             pointer.Item1 = (int)(body[i].transform.position.x / lengthOfCell);
             pointer.Item2 = (int)(body[i].transform.position.y / -lengthOfCell);
             aux = body[i];
@@ -306,7 +445,17 @@ public class GameManager : MonoBehaviour
 
     private void EatingBuilding()
     {
+        StartCoroutine("EatingBuildingCO");
+    }
 
+    private IEnumerator EatingBuildingCO()
+    {
+        stunned = true;
+        if(!berserk) yield return new WaitForSeconds(1.4f);
+        else yield return new WaitForSeconds(0.5f);
+        stunned = false;
+        mutationBarCount += 30;
+        if (mutationBarCount >= mutationBarMax) IncreaseSize();
     }
 
     private void BerserkMode()
@@ -320,6 +469,22 @@ public class GameManager : MonoBehaviour
         berserk = true;
         yield return new WaitForSeconds(10);
         berserk = false;
+    }
+
+    public Vector3 SnakeWorldPos()
+    {
+        return head.transform.position;
+    }
+
+    public void DealDamage(int x)
+    {
+        damageTaken += x;
+
+        if (damageTaken >= maxDamage)
+        {
+            DecreaseSize(1);
+            damageTaken = 0;
+        }
     }
 
 }
